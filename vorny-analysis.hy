@@ -1,6 +1,7 @@
 (import
  functools [partial]
  glob
+ html
  string
  pandas :as pd)
 (require hyrule :macros [ncut -> as->] :readers [%])
@@ -109,8 +110,9 @@
               ; remove excluded tweets
               (ncut it.loc (-> it.tweet-id (.isin exclude) bnot)) 
               (.assign it
-                       ; replace italic text with regular ASCII and add trailing newlines
-                       :tweet-text (-> (.str.translate it.tweet-text italic-trans) (+ "\n\n"))
+                       ; replace italic text with regular ASCII and add trailing newlines, 
+                       ; and unescape HTML encodings
+                       :tweet-text (-> it.tweet-text (.str.translate italic-trans) (+ "\n\n") (html.unescape))
                        ; assign root id i.e. first tweet in the thread
                        :root-tweet (.map it.tweet-id root-tweet))) 
 
