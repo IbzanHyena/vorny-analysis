@@ -1,10 +1,22 @@
 (import
+ datetime :as dt
  functools [partial]
  glob
  html
  string
- pandas :as pd)
-(require hyrule :macros [ncut -> as->] :readers [%])
+ matplotlib.pyplot :as plt
+ numpy :as np
+ pandas :as pd
+ seaborn :as sns
+ sklearn.compose [ColumnTransformer]
+ sklearn.feature-selection [SelectPercentile chi2]
+ sklearn.linear-model [ElasticNet Lasso LinearRegression Ridge]
+ sklearn.metrics [r2-score]
+ sklearn.model-selection [cross-validate train-test-split]
+ sklearn.pipeline [make-pipeline]
+ sklearn.preprocessing [OneHotEncoder StandardScaler]
+ sklearn.svm [SVC])
+(require hyrule :macros [ncut -> as-> doto] :readers [%])
 
 (defclass IdDict [dict]
   (defn __missing__ [self key] key))
@@ -50,7 +62,7 @@
            1625946131237638166 ; Profile play
            1626694622901686272 ; Profile play
            1627837090728755200} ; Reply to a reply
-           
+
  root-tweet (IdDict {1607525971237765124 1607525969694445569
                      1607525974328983553 1607525969694445569
                      1607738194308780033 1607738194308780033
@@ -108,21 +120,63 @@
               ; threads are recorded as the same time so id is used to disambiguate
               (.sort-values it :by "tweet_id")
               ; remove excluded tweets
-              (ncut it.loc (-> it.tweet-id (.isin exclude) bnot)) 
+              (ncut it.loc (-> it.tweet-id (.isin exclude) bnot))
               (.assign it
+                       ; parse times as times
+                       :time (pd.to-datetime it.time :format "%Y-%m-%d %H:%M %z")
                        ; replace italic text with regular ASCII and add trailing newlines, 
                        ; and unescape HTML encodings
                        :tweet-text (-> it.tweet-text (.str.translate italic-trans) (+ "\n\n") (html.unescape))
                        ; assign root id i.e. first tweet in the thread
-                       :root-tweet (.map it.tweet-id root-tweet))) 
+                       :root-tweet (.map it.tweet-id root-tweet)))
 
  to-tag (as-> tweet-data it
           (.groupby it "root_tweet")
           (.agg it {"time" "min"
                     "tweet_id" "count"
-                    "tweet_text" "sum"})
+                    "tweet_text" "sum"
+                    "likes" "first"})
           (.rename it :columns {"tweet_id" "thread_length"
                                 "tweet_text" "thread_text"})
-          (.assign it :thread-text (.str.strip it.thread-text))))
-      
+          (.assign it :thread-text (.str.strip it.thread-text))
+          (.assign it :clean-text (->
+                                   (.str.replace it.thread-text "[^a-zA-Z \\n]" "" :regex True)
+                                   (.str.lower)))))
+
 (.to-csv to-tag "data/to-tag.csv")
+
+(setv
+ features
+ (as-> to-tag it
+   (.assign it
+            :n-words (.apply it.clean-text len)
+            :account-age (-> it.time
+                             (- (pd.Timestamp "2022-12-26" :tz "UTC"))
+                             (.dt.floor "D")
+                             (. dt days))
+            :morning (it.time.dt.time.between (dt.time 6) (dt.time 12) :inclusive "left")
+            :afternoon (it.time.dt.time.between (dt.time 12) (dt.time 18) :inclusive "left")
+            :evening (it.time.dt.time.between (dt.time 18) (dt.time 21) :inclusive "left")
+            :night (| (>= it.time.dt.time (dt.time 21)) (< it.time.dt.time (dt.time 6)))
+            :blood (it.clean-text.str.contains "blood")
+            :bone (| #* (map it.clean-text.str.contains ["bone" "crack" "crunch" "crackle" "break"]))
+            :pet (it.clean-text.str.contains "pet")
+            :reform (it.clean-text.str.contains "reform")
+            :bully (it.clean-text.str.contains "bully")
+            :perma (| #* (map it.clean-text.str.contains ["for good" "perma" "forever" "eternity"]))
+            :maw (it.clean-text.str.contains "maw")) 
+   )
+ X (.drop features :columns ["time" "thread_text" "clean_text" "likes"])
+ y (get features "likes")
+ [X-train X-test y-train y-test] (train-test-split X y :test-size 0.2 :random-state 621)
+ estimators [LinearRegression Ridge Lasso ElasticNet])
+
+(defn evaluate-estimator [cls]
+  (setv estimator (make-pipeline (StandardScaler) (cls)))
+  (.fit estimator X-train y-train)
+  (setv r2 (.score estimator X-test y-test))
+  (print f"R² for {cls.__name__}: {r2 :.2%}")
+  (pd.Series :index X.columns :data (. estimator steps [-1] [1] coef-) :name cls.__name__))
+
+(-> (map evaluate-estimator estimators)
+    (pd.concat :axis 1))
